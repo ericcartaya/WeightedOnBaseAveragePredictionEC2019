@@ -1,0 +1,261 @@
+---
+title: "Regression Time Series Final Project"
+author: "Tyler O'Connor, Eric Cartaya, Vincent Pepe"
+date: "12/3/2019"
+output:
+  pdf_document: default
+  html_document:
+    df_print: paged
+---
+```{r include=FALSE, warning=FALSE, message=FALSE}
+setwd("C:/Users/Vince/Documents/Vincent Work/Rutgers/Regression Time Series/project")
+```
+
+### packages
+```{r message = FALSE, warning=FALSE}
+library(tidyverse)
+library(MASS)
+library(faraway)
+library(tinytex)
+library(olsrr)
+library(car)
+```
+
+### data sets
+```{r message=FALSE, warning=FALSE}
+Spin <- read_csv("2019_Pitchers_Spin.csv")
+Velocity <- read_csv("2019_Pitcher_Velocities.csv")
+Statcast2019 <- read_csv("statcast2019.csv")
+```
+
+### Used DPLYR to mutate, group, and summarize the Statcast dataset to give us a cleaner dataset
+```{r}
+
+Statcast2019 <- Statcast2019 %>%
+  mutate(Swing =  ifelse(description %in%
+                           c("foul", "foul_bunt", "foul_pitchout",
+                             "foul_top", "hit_into_play",
+                             "hit_into_play_no_out",
+                             "hit_into_play_score", "missed_bunt",
+                             "swinging_pitchout",
+                             "swinging_strike",
+                             "swinging_strike_blocked"), 1, 0),
+         Miss = ifelse(description %in%
+                         c("swinging_pitchout",
+                           "swinging_strike",
+                           "swinging_strike_blocked"), 1, 0)) %>%
+  rename(pitcher_id = pitcher) %>%
+  group_by(pitcher_id, pitch_type) %>% 
+  summarize(TotalPitches = n(),
+            TotalSwings = sum(Swing),
+            TotalMisses = sum(Miss),
+            HorizontalLocationBall = abs(mean(plate_x, na.rm = TRUE)),
+            VerticalLocationBall = abs(mean(plate_z, na.rm = TRUE)),
+            AverageExitVelocity = mean(launch_speed, na.rm = TRUE),
+            Barrels = sum(barrel, na.rm = TRUE),
+            AverageLaunchAngle = mean(launch_angle, na.rm = TRUE),
+            AverageHitDistance = mean(hit_distance_sc, na.rm = TRUE),
+            AverageEstimatedBattingAverage = mean(estimated_ba_using_speedangle, na.rm = TRUE),
+            AverageEstimatedWOBA = mean(estimated_woba_using_speedangle, na.rm = TRUE)) %>%
+  filter(TotalSwings > 10) %>% 
+  mutate(SwingPercentage = TotalSwings/TotalPitches,
+         MissPercentage = TotalMisses/TotalPitches, 
+         BarrelPercentage = Barrels/TotalPitches)
+```
+
+### Formatted The Spin And Velocity Data Sets To Merge Well With Statcast
+```{r}
+Spin <- gather(Spin, "PitchType", "SpinRate", -pitcher)
+Velocity <- gather(Velocity, "PitchType", "Velocity", -pitcher)
+```
+
+### Merged The Spin and Velocity Data Sets Together and Omitted NA Rows 
+```{r}
+SpinVelocity <- merge(Spin, Velocity, by=c("pitcher","PitchType"))
+SpinVelocity <- na.omit(SpinVelocity)
+```
+
+### Created A Bauer Index which is SpinRate/Velocity 
+```{r}
+SpinVelocity <- SpinVelocity %>% 
+  mutate(BauerIndex = SpinRate/Velocity)
+```
+
+### Renamed Two of the Columns for SpinVelocity dataset to match with Statcast
+```{r}
+SpinVelocity <- SpinVelocity %>% 
+  rename(pitch_type = PitchType) %>% 
+  rename(pitcher_id = pitcher)
+```
+
+### Completed DataSet which merged SpinVelocity and Statcast Datasets Together 
+```{r}
+complete <- merge(Statcast2019, SpinVelocity, by=c("pitcher_id","pitch_type"))
+```
+
+### Changed Pitch_Types From Characters To Numerics 
+```{r}
+complete$pitch_type <-case_when(
+  complete$pitch_type == "CH" ~ 1,
+  complete$pitch_type == "CU" ~ 2,
+  complete$pitch_type == "FC" ~ 3,
+  complete$pitch_type == "FF" ~ 4,
+  complete$pitch_type == "FS" ~ 5,
+  complete$pitch_type == "SI" ~ 6,
+  complete$pitch_type == "SL" ~ 7)
+```
+
+### Filtered The Complete Dataset For TotalPitches >= 150. This would be around 4-6 pitches per start or 4-5 an appearance to get a more significant dataset to draw from 
+```{r}
+
+complete2 <- complete %>% 
+  filter(TotalPitches >= 150) 
+complete2 <- complete2[,-10]
+```
+
+### Based on our Hypothesis, We Want To Test Various Factors That Can Contribute to AverageEstimatedWOBA. This is the full model 
+```{r}
+fullmodel <- lm(AverageEstimatedWOBA ~ ., data = complete2)
+summary(fullmodel)
+```
+
+### Based on our conclusion in class, we decided to run a hybrid selection. This Removes: pitcher_id, pitch_type, total misses, vertical location of the ball, barrels, and velocity
+```{r}
+hybridselect <- step(fullmodel,scope=list(lower=~1,upper=fullmodel),
+                     direction="both",trace=FALSE, na.rm = T)
+summary(hybridselect)
+```
+
+### We Tested The VIF Of Our Model To See If Any Variables Are Highly Correlated  
+```{r}
+vif(hybridselect)
+```
+
+### We See That Total Pitches and TotalSwings Are Highly Correlated As A Result We Remove Them And Keep The Other Variables In Our Hybrid Select Model
+```{r}
+fullmodel2 <- lm(AverageEstimatedWOBA ~ HorizontalLocationBall + AverageExitVelocity + 
+                   AverageHitDistance + AverageEstimatedBattingAverage + SwingPercentage + 
+                   MissPercentage + BarrelPercentage + SpinRate + BauerIndex, data = complete2)
+```
+
+## We Then Performed Various Normality Tests Which We Learned In Class To Check the Normality Assumptions in the Model
+
+### The graph of the Residuals vs. Fitted Values looks just ok
+```{r}
+ols_plot_resid_fit(fullmodel2)
+```
+
+### The p-value for the Shapiro-Wilk Test was less than .5 so we determined the data was not normal
+```{r}
+ols_test_normality(fullmodel2)
+```
+
+### The QQ-Plot doesn't look great, it has two fat tails. It more resembles a Uniform Distribution  
+```{r}
+qqnorm(residuals(fullmodel2)) 
+qqline(residuals(fullmodel2))
+```
+
+
+### The Histogram Confirms The Previous QQ Plot. It Is A Tad-Bit Right Skewed
+```{r}
+ols_plot_resid_hist(fullmodel2)
+```
+
+### We then tested the Cook's Distance. 
+```{r}
+cook <- cooks.distance(fullmodel2)
+halfnorm(cook, 1, ylab = "Cooks's Distances")
+
+```
+### as you can see from the model, there are a few extreme values, one being at 644, but none are greater than one
+
+### we decided to run an oulier test to see if we could remove any of the extremes from the model, but the outliers are significant, so we leave the model as is.
+```{r}
+outlierTest(fullmodel2)
+```
+### as lambda was closest to .5, we did a square root transformation on the data
+
+### After determining the data isn't normal, we ran a boxcox transformation to figure out what transformation to do on the data
+```{r}
+boxcox(fullmodel2, lambda = seq(-1, 2, .1))
+```
+
+### as lambda is closest to 0.5, we ran a square root transformation on the data, and ran a whole new lm
+```{r}
+complete3 <- sqrt(complete2)
+complete3 <- complete3[,c(6,8,10,11,12,13,14,15,16,18)]
+complete3model <- lm(AverageEstimatedWOBA ~ HorizontalLocationBall + AverageExitVelocity + 
+                   AverageHitDistance + AverageEstimatedBattingAverage + SwingPercentage + 
+                   MissPercentage + BarrelPercentage + SpinRate + BauerIndex, data = complete3)
+summary(complete3model)
+```
+
+### We Then Proceeded To Test The VIF Of Our Model To See If Any Variables Are Highly Correlated. 
+```{r}
+vif(complete3model) 
+```
+### None of the variables are over 10 which is good. We can keep the model as is
+
+
+### We again use the Shapiro-Wilk's Test To Test For Normality 
+```{r}
+ols_test_normality(complete3model)
+```
+## The Shapiro-Wilk Test Failed
+
+### We Then Test for Normality Using Residuals vs. Fitted Values Plot 
+```{r}
+ols_plot_resid_fit(complete3model)
+```
+### The Residual vs. Fitted Values Plot Looks Okay 
+
+### We Then Test Using A QQPlot 
+```{r}
+qqnorm(residuals(complete3model)) 
+qqline(residuals(complete3model))
+```
+### The QQ Plot Is Skewed To The Right With A Bit Of A Heavy-Tail
+
+### We'll Test To See If The Histogram Is Right-Skewed  
+```{r}
+ols_plot_resid_hist(complete3model)
+```
+### The Residual-Histogram Plot Is A Bit Right-Skewed. 
+
+### We Then Ran Another Box-Cox Test
+```{r}
+boxcox(complete3model, lambda = seq(-1, 2, .1))
+```
+### The BoxCox Lambda Gets Even Worse 
+
+### We Proceed To Run A Cook's Distance Test To Test For Influential Observations 
+```{r}
+cook2 <- cooks.distance(complete3model)
+halfnorm(cook2, 1, ylab = "Cooks's Distances")
+outlierTest(complete3model)
+```
+### Our outliers are significant in the model so we cannot remove them
+
+
+### As a result, after testing yet another square root transformation and seeing no improvement in the boxcox lambda we proceed to use the "full-model 2". We conclude that the model is likely flawed because normality assumptions do not hold which means there is likely an underlyingtrend that our model is not picking up on likely because we do not have access to the data due to most MLB data not being made public
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
